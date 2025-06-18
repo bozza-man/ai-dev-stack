@@ -1,0 +1,44 @@
+FROM jupyter/base-notebook:latest
+
+USER root
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    git \
+    vim \
+    htop \
+    && rm -rf /var/lib/apt/lists/*
+
+USER jovyan
+
+# Install essential AI/ML packages
+RUN pip install --no-cache-dir \
+    torch \
+    transformers \
+    sentence-transformers \
+    numpy \
+    pandas \
+    matplotlib \
+    seaborn \
+    plotly \
+    scikit-learn \
+    requests \
+    httpx \
+    jupyter \
+    jupyterlab \
+    ipywidgets
+
+# Create workspace directories
+RUN mkdir -p /home/jovyan/workspace/{data,models,notebooks,projects}
+
+# Set working directory
+WORKDIR /home/jovyan/workspace
+
+# Expose port
+EXPOSE 8888
+
+# Start Jupyter Lab
+CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root", "--token=ai-dev-token"]
+

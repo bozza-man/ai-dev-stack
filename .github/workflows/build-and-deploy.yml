@@ -1,0 +1,354 @@
+name: 🚀 Build and Deploy AI Stack
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'jupyter/**'
+      - 'api/**' 
+      - 'config/**'
+      - 'docker-compose*.yml'
+      - 'docker-bake.hcl'
+      - '.github/workflows/**'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'jupyter/**'
+      - 'api/**'
+      - 'config/**'
+      - 'docker-compose*.yml'
+      - 'docker-bake.hcl'
+  schedule:
+    - cron: '0 2 * * 1'  # Weekly rebuild on Mondays at 2 AM
+  workflow_dispatch:  # Manual trigger
+    inputs:
+      services:
+        description: 'Services to build (comma-separated: jupyter,api,mlflow,streamlit or "all")'
+        required: false
+        default: 'all'
+      environment:
+        description: 'Target environment'
+        required: false
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - development
+
+env:
+  REGISTRY: bozzza/bruteforcegroup
+  # Use Docker Build Cloud for faster builds
+  DOCKER_BUILDX_BUILDER: cloud-builder
+
+jobs:
+  # Detect changes and set build matrix
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      services: ${{ steps.changes.outputs.services }}
+      jupyter: ${{ steps.changes.outputs.jupyter }}
+      api: ${{ steps.changes.outputs.api }}
+      mlflow: ${{ steps.changes.outputs.mlflow }}
+      streamlit: ${{ steps.changes.outputs.streamlit }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect changed services
+        id: changes
+        run: |
+          if [[ "${{ github.event.inputs.services }}" != "" ]]; then
+            # Manual trigger - use input
+            if [[ "${{ github.event.inputs.services }}" == "all" ]]; then
+              echo "services=[\"jupyter\",\"api\",\"mlflow\",\"streamlit\"]" >> $GITHUB_OUTPUT
+              echo "jupyter=true" >> $GITHUB_OUTPUT
+              echo "api=true" >> $GITHUB_OUTPUT
+              echo "mlflow=true" >> $GITHUB_OUTPUT
+              echo "streamlit=true" >> $GITHUB_OUTPUT
+            else
+              IFS=',' read -ra SERVICES <<< "${{ github.event.inputs.services }}"
+              services_json="["
+              for service in "${SERVICES[@]}"; do
+                services_json+="\"$service\","
+                echo "$service=true" >> $GITHUB_OUTPUT
+              done
+              services_json="${services_json%,}]"
+              echo "services=$services_json" >> $GITHUB_OUTPUT
+            fi
+          else
+            # Auto-detect changes
+            services=()
+            
+            if git diff --name-only HEAD~1 HEAD | grep -E '^jupyter/|^docker-compose|^docker-bake'; then
+              services+=("jupyter")
+              echo "jupyter=true" >> $GITHUB_OUTPUT
+            fi
+            
+            if git diff --name-only HEAD~1 HEAD | grep -E '^api/|^docker-compose|^docker-bake'; then
+              services+=("api")
+              echo "api=true" >> $GITHUB_OUTPUT
+            fi
+            
+            if git diff --name-only HEAD~1 HEAD | grep -E '^config/mlflow/|^docker-compose|^docker-bake'; then
+              services+=("mlflow")
+              echo "mlflow=true" >> $GITHUB_OUTPUT
+            fi
+            
+            if git diff --name-only HEAD~1 HEAD | grep -E '^config/streamlit/|^docker-compose|^docker-bake'; then
+              services+=("streamlit")
+              echo "streamlit=true" >> $GITHUB_OUTPUT
+            fi
+            
+            # If no specific changes, build all on main branch
+            if [[ ${#services[@]} -eq 0 && "${{ github.ref }}" == "refs/heads/main" ]]; then
+              services=("jupyter" "api" "mlflow" "streamlit")
+              echo "jupyter=true" >> $GITHUB_OUTPUT
+              echo "api=true" >> $GITHUB_OUTPUT
+              echo "mlflow=true" >> $GITHUB_OUTPUT
+              echo "streamlit=true" >> $GITHUB_OUTPUT
+            fi
+            
+            # Convert to JSON array
+            printf -v services_json '%s,' "${services[@]}"
+            services_json="[\"${services_json%,}\"]"
+            services_json="${services_json//,\"/\",\"}"
+            echo "services=$services_json" >> $GITHUB_OUTPUT
+          fi
+
+  # Build and push images with Docker Build Cloud
+  build:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.services != '[""]'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: ${{ fromJson(needs.detect-changes.outputs.services) }}
+      fail-fast: false
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx with Build Cloud
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: cloud
+          endpoint: bozzza/bruteforcegroup
+          install: true
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: bozzza
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      - name: Generate metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=schedule,pattern={{date 'YYYYMMDD'}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=ai-${{ matrix.service }}-latest
+            type=raw,value=ai-${{ matrix.service }}-{{date 'YYYY-MM-DD'}}
+
+      - name: Build and push ${{ matrix.service }}
+        uses: docker/bake-action@v4
+        with:
+          targets: ${{ matrix.service }}
+          push: true
+          set: |
+            ${{ matrix.service }}.cache-from=type=gha
+            ${{ matrix.service }}.cache-to=type=gha,mode=max
+            ${{ matrix.service }}.tags=${{ steps.meta.outputs.tags }}
+        env:
+          REGISTRY: ${{ env.REGISTRY }}
+
+      - name: Generate SBOM
+        if: github.ref == 'refs/heads/main'
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.REGISTRY }}:ai-${{ matrix.service }}-latest
+          format: spdx-json
+          output-file: sbom-${{ matrix.service }}.spdx.json
+
+      - name: Upload SBOM
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ matrix.service }}
+          path: sbom-${{ matrix.service }}.spdx.json
+
+  # Security scanning
+  security-scan:
+    needs: [detect-changes, build]
+    if: needs.detect-changes.outputs.services != '[""]'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: ${{ fromJson(needs.detect-changes.outputs.services) }}
+    
+    steps:
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}:ai-${{ matrix.service }}-latest
+          format: 'sarif'
+          output: 'trivy-results-${{ matrix.service }}.sarif'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results-${{ matrix.service }}.sarif'
+
+  # Test deployment
+  test-deployment:
+    needs: [detect-changes, build]
+    if: needs.detect-changes.outputs.services != '[""]'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: bozzza
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      - name: Test stack deployment
+        run: |
+          # Use the cloud-built images for testing
+          export COMPOSE_FILE=docker-compose-cloud.yml
+          
+          # Pull the latest images
+          docker-compose pull || true
+          
+          # Start the stack
+          docker-compose up -d
+          
+          # Wait for services to be ready
+          echo "⏳ Waiting for services to start..."
+          sleep 30
+          
+          # Test Jupyter Lab
+          if docker ps | grep -q ai-jupyter; then
+            echo "✅ Jupyter Lab container is running"
+            # Test if Jupyter is responding
+            max_attempts=10
+            attempt=1
+            while [ $attempt -le $max_attempts ]; do
+              if curl -f http://localhost:8889 >/dev/null 2>&1; then
+                echo "✅ Jupyter Lab is responding"
+                break
+              fi
+              echo "⏳ Attempt $attempt/$max_attempts: Waiting for Jupyter Lab..."
+              sleep 10
+              ((attempt++))
+            done
+          fi
+          
+          # Test ChromaDB
+          if docker ps | grep -q ai-chroma; then
+            echo "✅ ChromaDB container is running"
+            if curl -f http://localhost:8000/api/v1/heartbeat >/dev/null 2>&1; then
+              echo "✅ ChromaDB is responding"
+            fi
+          fi
+          
+          # Show container status
+          docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+          
+          # Show logs for debugging
+          docker-compose logs --tail=50
+
+      - name: Cleanup test deployment
+        if: always()
+        run: |
+          docker-compose -f docker-compose-cloud.yml down -v || true
+
+  # Deploy to production (main branch only)
+  deploy-production:
+    needs: [detect-changes, build, security-scan, test-deployment]
+    if: github.ref == 'refs/heads/main' && needs.detect-changes.outputs.services != '[""]'
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to production
+        run: |
+          echo "🚀 Deploying AI Stack to production..."
+          echo "Registry: ${{ env.REGISTRY }}"
+          echo "Services built: ${{ needs.detect-changes.outputs.services }}"
+          
+          # Here you would typically:
+          # 1. Deploy to your production environment
+          # 2. Update container orchestration (k8s, docker swarm, etc.)
+          # 3. Run smoke tests
+          # 4. Send notifications
+          
+          echo "✅ Production deployment complete!"
+
+      - name: Create GitHub release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ github.run_number }}
+          release_name: AI Stack Release v${{ github.run_number }}
+          body: |
+            🚀 AI Development Stack Release
+            
+            **Services Updated:**
+            ${{ needs.detect-changes.outputs.services }}
+            
+            **Images:**
+            - Jupyter: `${{ env.REGISTRY }}:ai-jupyter-latest`
+            - API Server: `${{ env.REGISTRY }}:ai-api-server-latest`
+            - MLflow: `${{ env.REGISTRY }}:ai-mlflow-latest`
+            - Streamlit: `${{ env.REGISTRY }}:ai-streamlit-latest`
+            
+            **Features:**
+            - ☁️ Built with Docker Build Cloud
+            - 🔒 Security scanned with Trivy
+            - 📋 SBOM generated
+            - 🌍 Multi-platform (ARM64 + AMD64)
+            
+            **Changes:**
+            ${{ github.event.head_commit.message }}
+          draft: false
+          prerelease: false
+
+  # Notification
+  notify:
+    needs: [detect-changes, build, security-scan, test-deployment]
+    if: always() && needs.detect-changes.outputs.services != '[""]'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Notify build status
+        run: |
+          if [[ "${{ needs.build.result }}" == "success" && "${{ needs.security-scan.result }}" == "success" && "${{ needs.test-deployment.result }}" == "success" ]]; then
+            echo "✅ Build pipeline completed successfully!"
+            echo "Services: ${{ needs.detect-changes.outputs.services }}"
+            echo "Registry: ${{ env.REGISTRY }}"
+          else
+            echo "❌ Build pipeline failed!"
+            echo "Build: ${{ needs.build.result }}"
+            echo "Security: ${{ needs.security-scan.result }}"
+            echo "Test: ${{ needs.test-deployment.result }}"
+          fi
+

@@ -1,0 +1,57 @@
+services:
+  # Jupyter Lab - AI Development Environment
+  jupyter:
+    image: bozzza/bruteforcegroup:ai-jupyter-latest
+    build: 
+      context: ./jupyter
+      dockerfile: Dockerfile.simple
+    container_name: ai-jupyter
+    ports:
+      - "8889:8888"
+    volumes:
+      - ./data:/home/jovyan/workspace/data
+      - ./models:/home/jovyan/workspace/models
+      - ./jupyter/notebooks:/home/jovyan/workspace/notebooks
+      - ./projects:/home/jovyan/workspace/projects
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+      - JUPYTER_TOKEN=ai-dev-token
+    networks:
+      - ai-network
+    restart: unless-stopped
+
+  # ChromaDB Vector Database
+  chroma:
+    image: chromadb/chroma:latest
+    container_name: ai-chroma
+    ports:
+      - "8000:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - PERSIST_DIRECTORY=/chroma/chroma
+    networks:
+      - ai-network
+    restart: unless-stopped
+
+  # Redis for caching and sessions
+  redis:
+    image: redis:7-alpine
+    container_name: ai-redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - ai-network
+    restart: unless-stopped
+
+networks:
+  ai-network:
+    driver: bridge
+
+volumes:
+  chroma_data:
+  redis_data:
+

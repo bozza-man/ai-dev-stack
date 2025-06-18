@@ -1,0 +1,54 @@
+services:
+  # Jupyter Lab - Essential AI development environment
+  jupyter:
+    build: 
+      context: ./jupyter
+    container_name: ai-jupyter
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./data:/workspace/data
+      - ./models:/workspace/models
+      - ./jupyter/notebooks:/workspace/notebooks
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+      - JUPYTER_TOKEN=ai-dev-token
+    networks:
+      - ai-network
+    restart: unless-stopped
+
+  # Vector Database (Chroma) - Pre-built image
+  vector-db:
+    image: chromadb/chroma:latest
+    container_name: ai-chroma
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - PERSIST_DIRECTORY=/chroma/chroma
+    networks:
+      - ai-network
+    restart: unless-stopped
+
+  # Redis for caching
+  redis:
+    image: redis:7-alpine
+    container_name: ai-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - ai-network
+    restart: unless-stopped
+
+networks:
+  ai-network:
+    driver: bridge
+
+volumes:
+  chroma_data:
+  redis_data:
+

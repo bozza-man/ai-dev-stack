@@ -1,0 +1,117 @@
+version: '3.8'
+
+services:
+  # Jupyter Lab with AI/ML Libraries (Apple Silicon optimized)
+  jupyter:
+    image: bozzza/bruteforcegroup:ai-jupyter-latest
+    build: 
+      context: ./jupyter
+    container_name: ai-jupyter
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./data:/workspace/data
+      - ./models:/workspace/models
+      - ./jupyter/notebooks:/workspace/notebooks
+      - ~/.ssh:/home/jovyan/.ssh:ro
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+      - GRANT_SUDO=yes
+      - JUPYTER_TOKEN=ai-dev-token
+    networks:
+      - ai-network
+    restart: unless-stopped
+
+  # FastAPI Model Serving
+  api-server:
+    image: bozzza/bruteforcegroup:ai-api-server-latest
+    build: 
+      context: ./api
+    container_name: ai-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/app/models
+      - ./api:/app
+    environment:
+      - PYTHONPATH=/app
+    networks:
+      - ai-network
+    depends_on:
+      - vector-db
+    restart: unless-stopped
+
+  # Vector Database (Chroma)
+  vector-db:
+    image: chromadb/chroma:latest
+    container_name: ai-chroma
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - PERSIST_DIRECTORY=/chroma/chroma
+    networks:
+      - ai-network
+    restart: unless-stopped
+
+  # Redis for caching and queuing
+  redis:
+    image: redis:7-alpine
+    container_name: ai-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - ai-network
+    restart: unless-stopped
+
+  # MLflow for experiment tracking
+  mlflow:
+    image: bozzza/bruteforcegroup:ai-mlflow-latest
+    build:
+      context: ./config/mlflow
+    container_name: ai-mlflow
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow_data:/mlflow
+    environment:
+      - MLFLOW_BACKEND_STORE_URI=sqlite:///mlflow/mlflow.db
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT=/mlflow/artifacts
+    networks:
+      - ai-network
+    restart: unless-stopped
+
+  # Streamlit for quick prototyping
+  streamlit:
+    image: bozzza/bruteforcegroup:ai-streamlit-latest
+    build:
+      context: ./config/streamlit
+    container_name: ai-streamlit
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./config/streamlit/apps:/app
+    networks:
+      - ai-network
+    restart: unless-stopped
+
+networks:
+  ai-network:
+    driver: bridge
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+        - subnet: 2001:db8::/32
+
+volumes:
+  chroma_data:
+  redis_data:
+  mlflow_data:
+

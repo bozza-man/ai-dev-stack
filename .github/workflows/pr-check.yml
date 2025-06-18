@@ -1,0 +1,225 @@
+name: 🔍 PR Check - Build Cloud
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'jupyter/**'
+      - 'api/**'
+      - 'config/**'
+      - 'docker-compose*.yml'
+      - 'docker-bake.hcl'
+      - '.github/workflows/**'
+
+env:
+  REGISTRY: bozzza/bruteforcegroup
+
+jobs:
+  # Lint and validate configurations
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate Docker Compose files
+        run: |
+          # Check Docker Compose syntax
+          docker-compose -f docker-compose.yml config >/dev/null
+          docker-compose -f docker-compose-working.yml config >/dev/null
+          docker-compose -f docker-compose-cloud.yml config >/dev/null
+          echo "✅ All Docker Compose files are valid"
+
+      - name: Validate Docker Bake file
+        run: |
+          # Check Bake file syntax
+          docker buildx bake --print >/dev/null
+          echo "✅ Docker Bake file is valid"
+
+      - name: Lint Dockerfiles
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: jupyter/Dockerfile.simple
+          failure-threshold: warning
+
+      - name: Lint Python code
+        run: |
+          # Install Python and linting tools
+          python -m pip install --upgrade pip
+          pip install flake8 black isort
+          
+          # Lint API code
+          if [ -d "api" ]; then
+            echo "🔍 Linting API code..."
+            flake8 api/ --max-line-length=88 --extend-ignore=E203,W503
+            black --check api/
+            isort --check-only api/
+          fi
+          
+          # Lint config code
+          if [ -d "config" ]; then
+            echo "🔍 Linting config code..."
+            find config/ -name "*.py" -exec flake8 {} + --max-line-length=88 --extend-ignore=E203,W503 || true
+            find config/ -name "*.py" -exec black --check {} + || true
+          fi
+
+  # Build images for testing (single platform for speed)
+  build-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [jupyter, api]  # Only build core services for PR testing
+      fail-fast: false
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx with Build Cloud
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: cloud
+          endpoint: bozzza/bruteforcegroup
+          install: true
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: bozzza
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      - name: Build ${{ matrix.service }} (test)
+        uses: docker/bake-action@v4
+        with:
+          targets: ${{ matrix.service }}
+          set: |
+            ${{ matrix.service }}.platform=linux/amd64
+            ${{ matrix.service }}.cache-from=type=gha
+            ${{ matrix.service }}.cache-to=type=gha,mode=max
+            ${{ matrix.service }}.output=type=docker
+            ${{ matrix.service }}.tags=ai-${{ matrix.service }}:pr-${{ github.event.number }}
+
+      - name: Test ${{ matrix.service }} container
+        run: |
+          # Basic container functionality test
+          case "${{ matrix.service }}" in
+            jupyter)
+              echo "🧪 Testing Jupyter container..."
+              docker run --rm -d --name test-jupyter -p 8888:8888 \
+                ai-jupyter:pr-${{ github.event.number }}
+              
+              # Wait for startup
+              sleep 15
+              
+              # Test if container is running
+              if docker ps | grep -q test-jupyter; then
+                echo "✅ Jupyter container started successfully"
+                
+                # Test if Jupyter is responding (basic check)
+                docker logs test-jupyter
+                
+                # Cleanup
+                docker stop test-jupyter
+              else
+                echo "❌ Jupyter container failed to start"
+                docker logs test-jupyter || true
+                exit 1
+              fi
+              ;;
+              
+            api)
+              echo "🧪 Testing API container..."
+              docker run --rm -d --name test-api -p 8000:8000 \
+                ai-api:pr-${{ github.event.number }}
+              
+              # Wait for startup
+              sleep 10
+              
+              # Test if container is running
+              if docker ps | grep -q test-api; then
+                echo "✅ API container started successfully"
+                
+                # Test basic endpoint (if it exists)
+                docker logs test-api
+                
+                # Cleanup
+                docker stop test-api
+              else
+                echo "❌ API container failed to start"
+                docker logs test-api || true
+                exit 1
+              fi
+              ;;
+          esac
+
+  # Quick security scan
+  security-check:
+    needs: build-test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [jupyter, api]
+
+    steps:
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ai-${{ matrix.service }}:pr-${{ github.event.number }}
+          format: 'table'
+          exit-code: '0'  # Don't fail PR on vulnerabilities, just report
+
+      - name: Comment scan results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const service = '${{ matrix.service }}';
+            
+            // This would typically read Trivy results and post them as PR comments
+            // For now, just post a summary
+            const comment = `## 🔒 Security Scan Results for ${service}
+            
+            ✅ Security scan completed for \`${service}\` service.
+            
+            🔍 **Trivy scan summary:**
+            - Image: \`ai-${service}:pr-${{ github.event.number }}\`
+            - Status: Scan completed
+            - For detailed results, check the workflow logs.
+            
+            > This is an automated security check for PR #${{ github.event.number }}`;
+            
+            // Only post one comment per service per PR
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+  # Summary job
+  pr-summary:
+    needs: [lint, build-test, security-check]
+    if: always()
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: PR Status Summary
+        run: |
+          echo "## 📋 PR Check Summary"
+          echo ""
+          echo "| Check | Status |"
+          echo "|-------|--------|"
+          echo "| Lint | ${{ needs.lint.result == 'success' && '✅ Passed' || '❌ Failed' }} |"
+          echo "| Build Test | ${{ needs.build-test.result == 'success' && '✅ Passed' || '❌ Failed' }} |"
+          echo "| Security Check | ${{ needs.security-check.result == 'success' && '✅ Passed' || '❌ Failed' }} |"
+          echo ""
+          
+          if [[ "${{ needs.lint.result }}" == "success" && "${{ needs.build-test.result }}" == "success" && "${{ needs.security-check.result }}" == "success" ]]; then
+            echo "🎉 All checks passed! PR is ready for review."
+            exit 0
+          else
+            echo "❌ Some checks failed. Please review and fix issues."
+            exit 1
+          fi
+
