@@ -2,7 +2,7 @@ name: 🔍 PR Check - Build Cloud
 
 on:
   pull_request:
-    branches: [ main, develop ]
+    branches: [main, develop]
     paths:
       - 'jupyter/**'
       - 'api/**'
@@ -75,11 +75,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx with Build Cloud
+      - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
         with:
-          driver: cloud
-          endpoint: bozzza/bruteforcegroup
+          driver: docker-container
           install: true
 
       - name: Log in to Docker Hub

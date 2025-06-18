@@ -2,16 +2,16 @@ name: 🚀 Build and Deploy AI Stack
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [main, develop]
     paths:
       - 'jupyter/**'
-      - 'api/**' 
+      - 'api/**'
       - 'config/**'
       - 'docker-compose*.yml'
       - 'docker-bake.hcl'
       - '.github/workflows/**'
   pull_request:
-    branches: [ main ]
+    branches: [main]
     paths:
       - 'jupyter/**'
       - 'api/**'
@@ -37,8 +37,8 @@ on:
 
 env:
   REGISTRY: bozzza/bruteforcegroup
-  # Use Docker Build Cloud for faster builds
-  DOCKER_BUILDX_BUILDER: cloud-builder
+  # Use multi-platform docker-container builder
+  DOCKER_BUILDX_BUILDER: ai-dev-multi
 
 jobs:
   # Detect changes and set build matrix
@@ -131,11 +131,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx with Build Cloud
+      - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
         with:
-          driver: cloud
-          endpoint: bozzza/bruteforcegroup
+          driver: docker-container
           install: true
 
       - name: Log in to Docker Hub
