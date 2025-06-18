@@ -26,6 +26,8 @@ A complete, Docker-based AI development environment optimized for Apple Silicon 
 
 ## 🚀 Quick Start
 
+> **Status**: GitHub Actions workflows configured and ready for testing ✅
+
 ### Prerequisites
 - macOS with Apple Silicon (M1/M2/M3)
 - Docker Desktop 4.42+ installed and running
